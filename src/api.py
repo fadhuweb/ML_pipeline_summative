@@ -6,11 +6,11 @@ from typing import Optional, List
 import warnings
 
 from fastapi import FastAPI, UploadFile, File, Form, HTTPException
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, FileResponse
 import uvicorn
 
 # Suppress TensorFlow warnings
-os.environ['TF_CPP_MIN_LOG_LEVEL'] = '2'  # 0=all, 1=no INFO, 2=no WARNING, 3=no ERROR
+os.environ['TF_CPP_MIN_LOG_LEVEL'] = '2'
 warnings.filterwarnings('ignore', category=UserWarning)
 
 # Project modules
@@ -36,6 +36,9 @@ os.makedirs(UPLOAD_DIR, exist_ok=True)
 os.makedirs(MODELS_DIR, exist_ok=True)
 
 app = FastAPI(title="Chest X-ray Pneumonia API")
+
+# Global variable to store selected model
+SELECTED_MODEL = None
 
 
 # -----------------------
@@ -73,18 +76,12 @@ def _get_latest_model_file():
             detail=f"Models directory does not exist: {MODELS_DIR}"
         )
     
-    # Get all files in the directory
     all_files = os.listdir(MODELS_DIR)
-    print(f"All files in {MODELS_DIR}: {all_files}")
-    
-    # Filter for valid model files
     model_files = [
         f for f in all_files 
         if os.path.isfile(os.path.join(MODELS_DIR, f)) 
         and (f.endswith(".keras") or f.endswith(".h5"))
     ]
-    
-    print(f"Valid model files found: {model_files}")
     
     if not model_files:
         raise HTTPException(
@@ -92,7 +89,6 @@ def _get_latest_model_file():
             detail=f"No .keras or .h5 model files found in {MODELS_DIR}"
         )
     
-    # Sort by modification time to get the latest
     model_files_with_time = [
         (f, os.path.getmtime(os.path.join(MODELS_DIR, f))) 
         for f in model_files
@@ -102,17 +98,22 @@ def _get_latest_model_file():
     latest_model = model_files_with_time[0][0]
     full_path = os.path.join(MODELS_DIR, latest_model)
     
-    print(f"Selected latest model: {latest_model}")
-    print(f"Full path: {full_path}")
-    
-    # Double-check the file exists and is valid
-    if not os.path.exists(full_path):
-        raise HTTPException(
-            status_code=404,
-            detail=f"Model file path does not exist: {full_path}"
-        )
-    
     return full_path
+
+
+def _get_model_to_use():
+    """Get the model to use (selected or latest)"""
+    global SELECTED_MODEL
+    
+    if SELECTED_MODEL:
+        model_path = os.path.join(MODELS_DIR, SELECTED_MODEL)
+        if os.path.exists(model_path):
+            return model_path
+        else:
+            # Selected model doesn't exist, fall back to latest
+            SELECTED_MODEL = None
+    
+    return _get_latest_model_file()
 
 
 # -----------------------
@@ -124,13 +125,13 @@ def health():
 
 
 # -----------------------
-# Debug endpoint - Check models
+# List available models
 # -----------------------
-@app.get("/debug/models")
-def debug_models():
-    """
-    Debug endpoint to see what models are available and which one would be selected.
-    """
+@app.get("/models")
+def list_models():
+    """Get list of all available models"""
+    global SELECTED_MODEL
+    
     try:
         all_files = os.listdir(MODELS_DIR) if os.path.exists(MODELS_DIR) else []
         model_files = [
@@ -145,7 +146,8 @@ def debug_models():
             "models_directory": MODELS_DIR,
             "all_files": all_files,
             "valid_model_files": model_files,
-            "selected_latest_model": latest_model_path
+            "selected_latest_model": latest_model_path,
+            "currently_selected": SELECTED_MODEL
         }
     except Exception as e:
         return {
@@ -155,41 +157,81 @@ def debug_models():
 
 
 # -----------------------
+# Select model
+# -----------------------
+@app.post("/select-model")
+def select_model(model_name: str):
+    """Select a specific model to use for all operations"""
+    global SELECTED_MODEL
+    
+    model_path = os.path.join(MODELS_DIR, model_name)
+    
+    if not os.path.exists(model_path):
+        raise HTTPException(status_code=404, detail=f"Model '{model_name}' not found")
+    
+    if not (model_name.endswith(".keras") or model_name.endswith(".h5")):
+        raise HTTPException(status_code=400, detail="Invalid model format")
+    
+    SELECTED_MODEL = model_name
+    
+    return {
+        "status": "success",
+        "selected_model": SELECTED_MODEL,
+        "message": f"Now using '{model_name}' for all operations"
+    }
+
+
+# -----------------------
+# Download model
+# -----------------------
+@app.get("/download-model/{model_name}")
+def download_model(model_name: str):
+    """Download a specific model file"""
+    model_path = os.path.join(MODELS_DIR, model_name)
+    
+    if not os.path.exists(model_path):
+        raise HTTPException(status_code=404, detail="Model not found")
+    
+    return FileResponse(
+        model_path,
+        filename=model_name,
+        media_type="application/octet-stream"
+    )
+
+
+# -----------------------
 # Predict single image
 # -----------------------
 @app.post("/predict")
 async def predict(file: UploadFile = File(...)):
     """
     Upload a single image file and get prediction.
-    Automatically uses the latest model in MODELS_DIR.
+    Uses selected model or latest model.
     """
-    # Use the latest model automatically
-    model_file = _get_latest_model_file()
-    print(f"Using latest model: {model_file}")
+    model_file = _get_model_to_use()
+    print(f"Using model: {model_file}")
 
-    # Validate model file exists
     if not os.path.exists(model_file):
-        raise HTTPException(
-            status_code=404, 
-            detail=f"Model file not found: {model_file}"
-        )
+        raise HTTPException(status_code=404, detail=f"Model file not found: {model_file}")
     
-    # Validate model file format
     if not (model_file.endswith(".keras") or model_file.endswith(".h5")):
-        raise HTTPException(
-            status_code=400,
-            detail=f"Invalid model format: {model_file}. Only `.keras` or `.h5` files are supported."
-        )
+        raise HTTPException(status_code=400, detail=f"Invalid model format")
 
     # Save uploaded file temporarily
     tmp_folder = os.path.join("tmp", str(int(time.time() * 1000)))
     os.makedirs(tmp_folder, exist_ok=True)
     tmp_path = os.path.join(tmp_folder, file.filename)
-    _save_upload_file(file, tmp_path)
+    
+    # CRITICAL FIX: Reset file pointer before reading
+    await file.seek(0)
+    
+    # Save the file properly
+    with open(tmp_path, "wb") as f:
+        content = await file.read()
+        f.write(content)
 
     # Load model and predict
     try:
-        print(f"Loading model from: {model_file}")
         model = load_trained_model(model_file)
         result = predict_image_from_path(model, tmp_path)
     except ValueError as e:
@@ -197,7 +239,6 @@ async def predict(file: UploadFile = File(...)):
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Prediction error: {str(e)}")
     finally:
-        # Clean up temporary file
         try:
             shutil.rmtree(tmp_folder)
         except Exception:
@@ -211,10 +252,7 @@ async def predict(file: UploadFile = File(...)):
 # -----------------------
 @app.post("/upload")
 async def upload(files: List[UploadFile] = File(...)):
-    """
-    Accept multiple files or zipped folders for retraining.
-    Files are saved into UPLOAD_DIR. Zipped archives are extracted.
-    """
+    """Accept multiple files or zipped folders for retraining"""
     _clear_folder(UPLOAD_DIR)
     saved = []
     for upload_file in files:
@@ -232,18 +270,11 @@ async def upload(files: List[UploadFile] = File(...)):
 @app.post("/retrain")
 def trigger_retrain(epochs: int = 5, batch_size: int = 32, fine_tune: bool = True):
     """
-    Trigger retraining using files in UPLOAD_DIR. Returns new model path and training summary.
-    
-    Parameters:
-    - epochs: Number of training epochs (default: 5)
-    - batch_size: Batch size for training (default: 32)
-    - fine_tune: Whether to fine-tune the base model (default: True)
+    Trigger retraining using files in UPLOAD_DIR.
+    Uses selected model as base or latest model.
     """
     if not os.path.exists(UPLOAD_DIR) or not os.listdir(UPLOAD_DIR):
-        raise HTTPException(
-            status_code=400,
-            detail="No uploaded data found. Please POST to /upload first."
-        )
+        raise HTTPException(status_code=400, detail="No uploaded data found. Please POST to /upload first.")
 
     model_path, history = retrain_model(
         new_data_folder=UPLOAD_DIR,
@@ -264,17 +295,14 @@ def trigger_retrain(epochs: int = 5, batch_size: int = 32, fine_tune: bool = Tru
 @app.get("/metrics")
 def metrics(batch_size: int = 64):
     """
-    Evaluate the latest model on the test set and return performance metrics.
+    Evaluate model on test set.
+    Uses selected model or latest model.
     Returns: loss, accuracy, precision, recall, and AUC only.
-    
-    Parameters:
-    - batch_size: Batch size for evaluation (default: 64, larger = faster)
     """
     import numpy as np
     from sklearn.metrics import precision_score, recall_score, roc_auc_score
     
-    # Get the latest model automatically
-    model_path = _get_latest_model_file()
+    model_path = _get_model_to_use()
     print(f"Evaluating model: {model_path}")
 
     # Load the model
@@ -294,12 +322,11 @@ def metrics(batch_size: int = 64):
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to create test data generator: {str(e)}")
 
-    # Evaluate model for loss and accuracy
+    # Evaluate model
     try:
-        print("Calculating loss and accuracy...")
+        print("Calculating metrics...")
         results = model.evaluate(test_gen, verbose=1)
         
-        # Get loss and accuracy from evaluation
         if isinstance(results, (list, tuple)):
             loss = round(float(results[0]), 4)
             accuracy = round(float(results[1]), 4) if len(results) > 1 else None
@@ -307,21 +334,16 @@ def metrics(batch_size: int = 64):
             loss = round(float(results), 4)
             accuracy = None
         
-        # Reset generator for predictions
         test_gen.reset()
         
-        # Get predictions and true labels for precision, recall, AUC
-        print("Calculating precision, recall, and AUC...")
         y_pred_probs = model.predict(test_gen, verbose=1)
         y_pred = (y_pred_probs > 0.5).astype(int).flatten()
         y_true = test_gen.classes
         
-        # Calculate metrics
         precision = round(float(precision_score(y_true, y_pred)), 4)
         recall = round(float(recall_score(y_true, y_pred)), 4)
         auc = round(float(roc_auc_score(y_true, y_pred_probs)), 4)
         
-        # If accuracy wasn't available from evaluation, calculate it
         if accuracy is None:
             accuracy = round(float(np.mean(y_pred == y_true)), 4)
         

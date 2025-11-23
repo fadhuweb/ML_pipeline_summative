@@ -54,21 +54,24 @@ def create_model(input_shape=(224, 224, 3), l2_factor=0.0001, dropout_rate=0.3):
 # =========================
 #       TRAINING
 # =========================
-def train_model(model, train_generator, validation_generator, epochs, model_path, fine_tune=False):
+def train_model(model, train_generator, validation_generator, epochs, model_path, fine_tune=False, callbacks=None):
     early_stop = EarlyStopping(monitor="val_loss", patience=3, restore_best_weights=True)
     checkpoint = ModelCheckpoint(filepath=model_path, monitor="val_loss", save_best_only=True)
+
+    all_callbacks = [early_stop, checkpoint]
+    if callbacks:
+        all_callbacks.extend(callbacks)
 
     history = model.fit(
         train_generator,
         validation_data=validation_generator,
         epochs=epochs,
-        callbacks=[early_stop, checkpoint]
+        callbacks=all_callbacks
     )
 
     if fine_tune:
         print("Starting fine-tuning...")
 
-        # Unfreeze top layers of the VGG16 base
         base = model.layers[1] if isinstance(model.layers[1], tf.keras.Model) else None
         if base:
             base.trainable = True
@@ -90,10 +93,9 @@ def train_model(model, train_generator, validation_generator, epochs, model_path
             train_generator,
             validation_data=validation_generator,
             epochs=max(1, epochs // 2),
-            callbacks=[early_stop, checkpoint]
+            callbacks=all_callbacks
         )
 
-        # Merge history values
         for key in history.history.keys():
             history.history[key] += fine_history.history[key]
 
@@ -104,9 +106,6 @@ def train_model(model, train_generator, validation_generator, epochs, model_path
 #       SAVE and LOAD
 # =========================
 def save_model(model, path):
-    """
-    Save model as .keras file for Keras 3 compatibility.
-    """
     if not path.endswith(".keras"):
         path += ".keras"
     model.save(path)
@@ -115,9 +114,6 @@ def save_model(model, path):
 
 
 def load_trained_model(path):
-    """
-    Load a model saved as .keras or .h5 file.
-    """
     if not os.path.exists(path):
         raise FileNotFoundError(f"Model file not found: {path}")
 
@@ -141,14 +137,9 @@ def retrain_model(
     batch_size,
     epochs,
     output_directory,
-    fine_tune=True
+    fine_tune=True,
+    callbacks=None
 ):
-    """
-    Retrains the model using new uploaded data.
-    Merges new images with existing training data.
-    Saves a new version with timestamp.
-    Returns model_path and history.
-    """
     print("Starting retraining process")
 
     # Merge new images into existing training set
@@ -211,7 +202,8 @@ def retrain_model(
         validation_generator=validation_generator,
         epochs=epochs,
         model_path=save_path,
-        fine_tune=fine_tune
+        fine_tune=fine_tune,
+        callbacks=callbacks  # <-- pass callbacks here
     )
 
     print("Retraining complete")
