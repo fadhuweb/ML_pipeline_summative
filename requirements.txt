@@ -11,5 +11,5 @@ Pillow
 fastapi
 uvicorn
 tensorflow
-python multipart
-python dotenv
+python-multipart
+python-dotenv
