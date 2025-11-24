@@ -93,8 +93,9 @@ if available_models:
             r = requests.post(f"{API_BASE_URL}/select-model", params={"model_name": selected_model})
             if r.status_code == 200:
                 st.sidebar.success(f"Model {selected_model} selected")
+                # Clear metrics only if model truly changed
                 if st.session_state.last_selected_model != selected_model:
-                    st.session_state.metrics_cache = {}
+                    st.session_state.metrics_cache.clear()
                     st.session_state.last_selected_model = selected_model
                 st.rerun()
             else:
@@ -134,12 +135,10 @@ if page == "🔍 Predict":
                 with st.spinner("Analyzing image"):
                     try:
                         file.seek(0)
-                        
                         files = {"file": (file.name, file, file.type)}
                         r = requests.post(f"{API_BASE_URL}/predict", files=files, timeout=30)
                         if r.status_code == 200:
                             result = r.json()
-                            
                             prediction = result.get('label', 'Unknown')
                             confidence = result.get('confidence', 0)
                             
@@ -250,7 +249,7 @@ elif page == "⚙️ Training":
                     with st.expander("Full Results"):
                         st.json(result)
                     
-                    st.session_state.metrics_cache = {}
+                    st.session_state.metrics_cache.clear()
                 else:
                     st.error(f"Training failed: {r.text}")
             except Exception as e:
@@ -260,39 +259,43 @@ elif page == "⚙️ Training":
 elif page == "📊 Metrics":
     st.header("Model Performance Metrics")
     
-    cache_key = selected_model if selected_model else "latest"
+    # Ensure session state is initialized
+    if 'metrics_cache' not in st.session_state:
+        st.session_state.metrics_cache = {}
+    if 'last_selected_model' not in st.session_state:
+        st.session_state.last_selected_model = selected_model
     
-    if cache_key in st.session_state.metrics_cache:
-        st.info("Using cached metrics. Refresh to recalculate.")
-        metrics = st.session_state.metrics_cache[cache_key]
-        show_metrics = True
-    else:
-        metrics = None
-        show_metrics = False
+    # Clear metrics only if model changed
+    if selected_model != st.session_state.last_selected_model:
+        st.session_state.metrics_cache.clear()
+        st.session_state.last_selected_model = selected_model
+    
+    cache_key = selected_model
+    
+    show_metrics = cache_key in st.session_state.metrics_cache
+    metrics = st.session_state.metrics_cache.get(cache_key, None)
     
     col1, col2 = st.columns([3, 1])
     
     with col1:
         if not show_metrics:
-            st.warning("No cached metrics available.")
+            st.warning("No metrics shown.")
     
     with col2:
-        if st.button("Refresh Metrics", type="primary", use_container_width=True):
+        if st.button("View Metrics", type="primary", use_container_width=True):
             with st.spinner("Evaluating metrics"):
                 try:
                     r = requests.get(f"{API_BASE_URL}/metrics", timeout=1200)
                     if r.status_code == 200:
                         metrics = r.json()
                         st.session_state.metrics_cache[cache_key] = metrics
-                        show_metrics = True
                         st.success("Metrics updated")
-                        st.rerun()
                     else:
                         st.error(f"Failed: {r.text}")
                 except Exception as e:
                     st.error(f"Error: {str(e)}")
     
-    if show_metrics and metrics:
+    if metrics:
         st.markdown("---")
         
         col1, col2, col3, col4, col5 = st.columns(5)
@@ -339,7 +342,7 @@ elif page == "📊 Metrics":
         
         st.pyplot(fig)
         
-        st.caption(f"Metrics calculated for model: {cache_key}")
+        st.caption(f"Metrics shown for model: {cache_key}")
 
 # Page 4 visualizations
 elif page == "📈 Visualizations":
